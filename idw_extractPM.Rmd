@@ -1,0 +1,146 @@
+---
+title: "idw_extractPM"
+author: "Tingting"
+date: "April 14, 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## read all libraries
+```{r}
+library(ncdf4)
+library(raster)
+library(rgdal)
+require(sf)
+library(tmap)
+library(dplyr)
+```
+
+##1.Create shp point
+```{r}
+#1. Create shp point from a .csv with 'Longitude' and 'Latitude'
+path = "S:/MNHS-SPHPM-EPM/ChildrenEnviro/Other_Papers/Xiang/"
+address <- read.csv(paste(path, "shanghai-address2.csv",sep = ""))
+address<-address[which(!is.na(address$Longitude)),]  # remove null data
+coordinates(address)= ~ Longitude+ Latitude
+crs(address)<-"+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"
+
+# 1.1 read a shaplefile of Shanghai boundary
+sh_bound<-read_sf(paste(path,"sh_bound.shp",sep=""))
+```
+
+```{r}
+# convert address into a dataframe to store all extracted data
+ad.df<-as.data.frame(address)
+```
+
+##2.read all nc data
+```{r}
+# 2. read all nc data filenames as a list 
+dir_open = "S:/MNHS-SPHPM-EPM/ChildrenEnviro/Other_Papers/Xiang/nc_data/"
+# get the files
+files <- list.files(path = dir_open, pattern = "*.nc")
+print(length(files))
+```
+
+## 3.try !
+```{r}
+# 3. let's have a try first before the loop 
+# raw data
+b<-brick(paste(dir_open,files[1], sep=""), var= "PM2.5")
+b0<-b[[1]]
+sh_r<- crop(b0, sh_bound) # raw data
+
+# IDW 
+pts <- rasterToPoints(sh_r, spatial = T) 
+names(pts)<-"rawData"
+sh_r[is.na(sh_r)]<-0
+grd<-rasterToPoints(sh_r, spatial = TRUE) 
+P.idw <- gstat::idw(rawData ~ 1, pts, newdata=grd, idp= 2.0) 
+r <- rasterize(P.idw, sh_r, "var1.pred", update = TRUE) 
+```
+
+## 3.1 Plot
+```{r ,echo=T}
+p_raw<-tm_shape(sh_r) + 
+  tm_raster(
+            palette = "seq",  
+            style = "cont", 
+            n = 5, 
+            title="Raw data") + 
+  tm_shape(sh_bound)+tm_borders(col = "grey30")+ # mapping bounder (polygon)
+  tm_legend(legend.position = c("left", "top"))
+
+p_idw<-tm_shape(r) + 
+  tm_raster(
+            palette = "seq",  
+            style = "cont", 
+            n = 5, 
+            title="IDW interpolation") + 
+  tm_shape(sh_bound)+tm_borders(col = "grey30")+ # mapping bounder (polygon)
+  tm_legend(legend.position = c("left", "top"))
+
+tmap_arrange(p_raw,p_idw, ncol = 2)
+```
+
+```{r, echo=TRUE}
+# 4. loop 
+for (i in 1:length(files)) {
+  # get the date of the readIn file
+  t0<-Sys.time()
+  
+  date <- strsplit(files[i],"_")[[1]][4]
+  print(paste("Processing start: ",date, sep = ""))
+  
+  # read a nc file as raster
+  b<-brick(paste(dir_open,files[i], sep=""), var= "PM2.5")
+  b0<-b[[1]]
+  
+  # subset a raster for Shanghai
+  sh_r<- crop(b0, sh_bound)
+  
+  ################ IDW ####################
+  # only valid data
+  pts <- rasterToPoints(sh_r, spatial = T) 
+  names(pts)<-"rawData"
+  
+  #  Create an empty grid 
+  sh_r[is.na(sh_r)]<-0
+  grd<-rasterToPoints(sh_r, spatial = TRUE) 
+
+  # Interpolate the grid cells using a power value of 2 (idp=2.0)
+  P.idw <- gstat::idw(rawData ~ 1, pts, newdata=grd, idp= 2.0) # the prediction variance is NA because idw has no uncertainty measure
+  
+  ##### link the predicted to the raw data (not necessary)
+  df_raw<-as.data.frame(grd)
+  df_pred<-as.data.frame(P.idw) 
+  df<-left_join(df_raw, df_pred, by=c('x','y'))
+  
+  # Convert to raster object, clip to a subset(if needed)
+  r <- rasterize(P.idw, sh_r, "var1.pred", update = TRUE) # convert point to a raster
+  
+  ################# Extract raster value by points ###################
+  rasValue <- extract(r, address)
+
+  # Combine raster values with point and save as a CSV file.
+  ad.df<- cbind(ad.df,rasValue)
+  names(ad.df)[i+4]<-paste("pm25_",date,sep = "")
+  
+  # precessing status
+  print(paste("Finished ", i, " time = ", Sys.time()-t0, sep = ""))
+}
+
+# Export: save as a CSV file.
+write.table(ad.df,file= paste(path, "sh_PM25_2015_2021.csv"), append=FALSE, sep= ",", row.names = FALSE, col.names=TRUE)
+
+```
+
+##3.export to csv
+```{r}
+# Export: save as a CSV file.
+write.table(ad.df,file= paste(path, "sh_PM25_daily.csv"), append=FALSE, sep= ",", row.names = FALSE, col.names=TRUE)
+```
+
